@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import mpl_toolkits.axisartist.angle_helper as angle_helper
 import numpy as np
 from matplotlib.projections import PolarAxes
-from matplotlib.transforms import Affine2D
+from matplotlib.transforms import Affine2D, Bbox
 from mpl_toolkits.axisartist import SubplotHost
 from mpl_toolkits.axisartist.grid_helper_curvelinear import \
     GridHelperCurveLinear
@@ -37,6 +37,12 @@ class ModifiedExtremeFinderCycle(angle_helper.ExtremeFinderCycle):
     https://matplotlib.org/_modules/mpl_toolkits/axisartist/angle_helper.html#ExtremeFinderCycle.__call__
     """
     def __call__(self, transform_xy, x1, y1, x2, y2):
+        # Matplotlib 3.11 moved this calculation to
+        # _find_transformed_bbox(), which is also called directly by
+        # GridFinder.  Keep the legacy implementation for older releases.
+        if hasattr(super(), '_find_transformed_bbox'):
+            return super().__call__(transform_xy, x1, y1, x2, y2)
+
         x, y = np.meshgrid(
             np.linspace(x1, x2, self.nx), np.linspace(y1, y2, self.ny))
         lon, lat = transform_xy(np.ravel(x), np.ravel(y))
@@ -76,6 +82,44 @@ class ModifiedExtremeFinderCycle(angle_helper.ExtremeFinderCycle):
             lat_max = min(max0, lat_max)
 
         return lon_min, lon_max, lat_min, lat_max
+
+    def _find_transformed_bbox(self, trans, bbox):
+        """Find grid extremes using the Matplotlib 3.11 interface."""
+        grid = np.reshape(np.meshgrid(
+            np.linspace(bbox.x0, bbox.x1, self.nx),
+            np.linspace(bbox.y0, bbox.y1, self.ny)), (2, -1)).T
+        lon, lat = trans.transform(grid).T
+
+        with np.errstate(invalid='ignore'):
+            if self.lon_cycle is not None:
+                lon0 = np.nanmin(lon)
+                # Changed from 180 to 360 to be able to span only
+                # 90-270 (left hand side)
+                lon -= 360. * ((lon - lon0) > 360.)
+            if self.lat_cycle is not None:  # pragma: no cover
+                lat0 = np.nanmin(lat)
+                lat -= 360. * ((lat - lat0) > 180.)
+
+        transformed_bbox = Bbox.null()
+        transformed_bbox.update_from_data_xy(np.column_stack([lon, lat]))
+        transformed_bbox = transformed_bbox.expanded(
+            1 + 2 / self.nx, 1 + 2 / self.ny)
+        lon_min, lat_min, lon_max, lat_max = transformed_bbox.extents
+
+        if self.lon_cycle:
+            lon_max = min(lon_max, lon_min + self.lon_cycle)
+        if self.lat_cycle:  # pragma: no cover
+            lat_max = min(lat_max, lat_min + self.lat_cycle)
+
+        if self.lon_minmax is not None:
+            lon_min = max(self.lon_minmax[0], lon_min)
+            lon_max = min(self.lon_minmax[1], lon_max)
+
+        if self.lat_minmax is not None:
+            lat_min = max(self.lat_minmax[0], lat_min)
+            lat_max = min(self.lat_minmax[1], lat_max)
+
+        return Bbox.from_extents(lon_min, lat_min, lon_max, lat_max)
 
 
 def sgrid(subplot=(1, 1, 1), scaling=None):
